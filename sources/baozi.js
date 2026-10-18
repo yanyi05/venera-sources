@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.6.0";
+  version = "1.6.1";
 
   minAppVersion = "1.6.0";
 
@@ -373,8 +373,15 @@ class BaozimhWww extends ComicSource {
   logWebviewCookieState() {
     try {
       const names = (Network.getCookies(this.baseUrl) || []).map((item) => item && item.name).filter(Boolean);
-      log(names.length ? "info" : "warning", "baozimh_www webview",
-        names.length ? `WebView Cookie jar 已有 Cookie，名称=[${names.join(", ")}]` : "WebView 验证完成但 Cookie jar 暂无可见 Cookie");
+      const nonAnalytics = names.filter((name) => !/^_(?:ga|gid|gat)(?:_|$)/i.test(name));
+      if (!names.length) {
+        log("warning", "baozimh_www webview", "WebView 回调后 Cookie jar 暂无可见 Cookie");
+      } else if (!nonAnalytics.length) {
+        log("warning", "baozimh_www webview",
+          `WebView Cookie jar 仅看到统计 Cookie，不能证明验证已通过；名称=[${names.join(", ")}]`);
+      } else {
+        log("info", "baozimh_www webview", `WebView Cookie jar 可见 Cookie 名称=[${names.join(", ")}]`);
+      }
     } catch (e) {
       try { log("warning", "baozimh_www webview", `读取 WebView Cookie 状态失败: ${String(e)}`); } catch (ignored) {}
     }
@@ -422,12 +429,12 @@ class BaozimhWww extends ComicSource {
        */
       checkStatus: (url, title) => {
         try {
-          log("info", "baozimh_www v1.0.5 webview", `url=${url} title=${title}`);
+          log("info", "baozimh_www v1.6.1 webview", `url=${url} title=${title}`);
         } catch (e) {}
-        if (!url || !/baozimh\.com/.test(url)) {
+        if (!url || !/^https?:\/\/(?:[a-z0-9-]+\.)?baozimh\.com(?:[:/]|$)/i.test(url)) {
           return false;
         }
-        const t = (title || "").toLowerCase();
+        const t = (title || "").trim().toLowerCase();
         // 页面标题已显示验证通过
         if (t.includes("验证通过") || t.includes("verified")) {
           return true;
@@ -445,7 +452,12 @@ class BaozimhWww extends ComicSource {
         ) {
           return false;
         }
-        // 已离开验证入口,回到站点正常页面
+        // 回调可能在首页仍为空白/加载中的阶段触发。不能仅凭离开验证 URL
+        // 就宣告成功，否则应用会提前保存尚未完成验证的 Cookie。
+        // 等到站点页面有非空、非挑战标题后再让应用保存 WebView Cookie。
+        if (!t) {
+          return false;
+        }
         return true;
       },
       onLoginSuccess: () => this.logWebviewCookieState(),
