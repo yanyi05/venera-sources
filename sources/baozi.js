@@ -4,7 +4,7 @@ class BaozimhWww extends ComicSource {
   name = "包子漫画 (www)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozimh_www";
+  key = "baozi";
 
   version = "1.2.1";
 
