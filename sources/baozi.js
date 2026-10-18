@@ -4,9 +4,9 @@ class BaozimhWww extends ComicSource {
   name = "包子漫画 (yyya)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozi";
+  key = "baozimh";
 
-  version = "1.6.1";
+  version = "1.6.2";
 
   minAppVersion = "1.6.0";
 
@@ -429,7 +429,7 @@ class BaozimhWww extends ComicSource {
        */
       checkStatus: (url, title) => {
         try {
-          log("info", "baozimh_www v1.6.1 webview", `url=${url} title=${title}`);
+            log("info", "baozimh_www v" + this.version + " webview", `url=${url} title=${title}`);
         } catch (e) {}
         if (!url || !/^https?:\/\/(?:[a-z0-9-]+\.)?baozimh\.com(?:[:/]|$)/i.test(url)) {
           return false;
@@ -618,7 +618,20 @@ class BaozimhWww extends ComicSource {
               .querySelectorAll("div.comics-card")
               .map((e) => this.parseComic(e));
             if (title && comics.length > 0) {
-              result.push({ title: title, comics: comics });
+              const normalizedTitle = title.replace(/\s+/g, "");
+              let viewMore = null;
+              if (normalizedTitle.includes("热门漫画") || normalizedTitle.includes("熱門漫畫")) {
+                viewMore = {
+                  page: "category",
+                  attributes: { category: "热门漫画", param: "__home_hot" },
+                };
+              } else if (normalizedTitle.includes("推荐国漫") || normalizedTitle.includes("推薦國漫")) {
+                viewMore = {
+                  page: "category",
+                  attributes: { category: "推荐国漫", param: "__home_cn" },
+                };
+              }
+              result.push({ title: title, comics: comics, ...(viewMore ? { viewMore } : {}) });
             }
           }
           return result;
@@ -677,10 +690,13 @@ class BaozimhWww extends ComicSource {
 
   categoryComics = {
     load: async (category, param, options, page) => {
-      const region = options[0] || "all";
+      const isHomeHot = param === "__home_hot";
+      const isHomeCn = param === "__home_cn";
+      const apiType = isHomeHot || isHomeCn ? "all" : param;
+      const region = isHomeCn ? "cn" : (options[0] || "all");
       const state = options[1] || "all";
       const url =
-        `${this.baseUrl}/api/bzmhq/amp_comic_list?type=${param}` +
+        `${this.baseUrl}/api/bzmhq/amp_comic_list?type=${apiType}` +
         `&region=${region}&state=${state}&filter=%2a&page=${page}&limit=36` +
         `&language=${this.lang}&__amp_source_origin=${encodeURIComponent(this.baseUrl)}`;
       const res = await this.request(url);
