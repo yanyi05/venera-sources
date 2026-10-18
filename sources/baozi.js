@@ -1,12 +1,12 @@
 /** @type {import('./_venera_.js')} */
 
 class BaozimhWww extends ComicSource {
-  name = "包子漫画 (yyya)";
+  name = "包子漫画 (www)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozi";
+  key = "baozimh_www";
 
-  version = "1.4.0";
+  version = "1.5.0";
 
   minAppVersion = "1.6.0";
 
@@ -101,9 +101,9 @@ class BaozimhWww extends ComicSource {
             return;
           }
           if (res.status === 200) {
-            const cookie = this.loadData("login_cookie") ? "Cookie 登录（优先）" : (this.loadSetting("cookie") ? "备用手动 Cookie" : "未设置 Cookie");
-            const ua = !!this.siteHeaders(url)["User-Agent"];
             const appCookies = (Network.getCookies(url) || []).map((item) => item.name).filter(Boolean);
+            const cookie = appCookies.length ? "WebView Cookie（主）" : (this.loadData("login_cookie") ? "Cookie 表单备用" : (this.loadSetting("cookie") ? "手动 Cookie 备用" : "未设置 Cookie"));
+            const ua = !!this.siteHeaders(url)["User-Agent"];
             const appCookieState = appCookies.length ? `应用 Cookie：已检测到 (${appCookies.join(", ")})` : "应用 Cookie：未检测到";
             UI.showMessage(`连接成功：${this.host} (HTTP 200)；${appCookieState}；当前 Cookie 来源：${cookie}；User-Agent：${ua ? "已启用" : "未启用"}`);
             return;
@@ -139,7 +139,7 @@ class BaozimhWww extends ComicSource {
   //   3. 验证过期后重复第 2 步即可。
   // ---------------------------------------------------------------------------
   get challengeMessage() {
-    return `需要通过网站验证:请先在 Cookie 登录入口填写并校验 Cookie；若暂不可用，可在“备用 Cookie”设置手动粘贴。也可使用“打开当前站点”完成网页登录。User-Agent 需在设置中填写。`;
+    return `需要通过网站验证:请优先使用“重新登录”在应用内完成网页验证；如 WebView Cookie 不可用，再使用 Cookie 登录入口或“备用 Cookie”设置。User-Agent 需在设置中填写。`;
   }
 
   /**
@@ -209,12 +209,18 @@ class BaozimhWww extends ComicSource {
     if (!pageHost && !imageHost) return h;
 
     const clean = (value) => String(value || "").replace(/[\r\n]+/g, "").trim();
-    // Cookie 登录是首选来源;“备用 Cookie”设置仅在登录 Cookie 为空时使用。
-    const primaryCookie = clean(this.loadData("login_cookie"));
-    const fallbackCookie = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
-    const cookie = primaryCookie || fallbackCookie;
+    // WebView 原生 Cookie jar 是首选；仅在 jar 里没有 Cookie 时供直连请求使用备用值。
+    const appCookies = pageHost && !options.forImage && options.cookieMode !== "none"
+      ? (Network.getCookies(url) || [])
+      : [];
+    const hasWebviewCookies = appCookies.some((item) => item && item.name && item.value != null);
+    const primaryFallback = clean(this.loadData("login_cookie"));
+    const manualFallback = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
+    const fallbackCookie = primaryFallback || manualFallback;
     const ua = clean(this.loadSetting("user_agent") || this.settings.user_agent.default).replace(/^user-agent:\s*/i, "");
-    if (pageHost && !options.forImage && cookie) h.Cookie = cookie;
+    if (pageHost && !options.forImage && options.cookieMode !== "none" && !hasWebviewCookies && fallbackCookie) {
+      h.Cookie = fallbackCookie;
+    }
     if (ua) h["User-Agent"] = ua;
     return h;
   }
@@ -285,12 +291,11 @@ class BaozimhWww extends ComicSource {
    */
   async request(url, headers = {}) {
     const urls = this.mainRequestUrls(url);
-    const primaryCookie = String(this.loadData("login_cookie") || "").trim();
-    const fallbackCookie = String(this.loadSetting("cookie") || "").replace(/^cookie:\s*/i, "").trim();
-    const cookieCandidates = [];
-    if (primaryCookie) cookieCandidates.push({ value: primaryCookie, source: "loginWithCookies" });
-    if (fallbackCookie && fallbackCookie !== primaryCookie) cookieCandidates.push({ value: fallbackCookie, source: "fallback-setting" });
-    if (cookieCandidates.length === 0) cookieCandidates.push({ value: "", source: "app-cookie-jar" });
+    const cookieCandidates = [{ value: "", source: "webview-cookie-jar" }];
+    const loginCookie = String(this.loadData("login_cookie") || "").trim();
+    const manualCookie = String(this.loadSetting("cookie") || "").replace(/^cookie:\s*/i, "").trim();
+    if (loginCookie) cookieCandidates.push({ value: loginCookie, source: "loginWithCookies-fallback" });
+    if (manualCookie && manualCookie !== loginCookie) cookieCandidates.push({ value: manualCookie, source: "manual-fallback" });
 
     let lastError = null;
     for (let i = 0; i < urls.length; i++) {
@@ -299,7 +304,7 @@ class BaozimhWww extends ComicSource {
       let usedCookieSource = "app-cookie-jar";
       for (let c = 0; c < cookieCandidates.length; c++) {
         const candidate = cookieCandidates[c];
-        const requestHeaders = { ...this.siteHeaders(targetUrl), ...headers };
+        const requestHeaders = { ...this.siteHeaders(targetUrl, { cookieMode: "none" }), ...headers };
         if (candidate.value && this.isBaoziPageHost(this.requestHost(targetUrl))) {
           requestHeaders.Cookie = candidate.value;
         }
@@ -364,36 +369,22 @@ class BaozimhWww extends ComicSource {
     }
   }
 
-  /**
-   * WebView 成功后读取宿主已捕获的 Cookie 并同步保存到源数据。
-   * 不记录 Cookie 值；仅记录 Cookie 名称用于诊断。
-   */
-  captureWebviewCookies() {
-    const cookies = {};
-    for (const url of [this.baseUrl, "https://www.baozimh.com/"]) {
-      try {
-        for (const item of Network.getCookies(url) || []) {
-          if (item && item.name && item.value != null) cookies[item.name] = String(item.value);
-        }
-      } catch (e) {}
+  /** WebView 回调中只记录 Cookie 名称，不重组 Cookie 请求头。 */
+  logWebviewCookieState() {
+    try {
+      const names = (Network.getCookies(this.baseUrl) || []).map((item) => item && item.name).filter(Boolean);
+      log(names.length ? "info" : "warning", "baozimh_www webview",
+        names.length ? `WebView Cookie jar 已有 Cookie，名称=[${names.join(", ")}]` : "WebView 验证完成但 Cookie jar 暂无可见 Cookie");
+    } catch (e) {
+      try { log("warning", "baozimh_www webview", `读取 WebView Cookie 状态失败: ${String(e)}`); } catch (ignored) {}
     }
-    const names = Object.keys(cookies);
-    if (names.length === 0) {
-      try { log("warning", "baozimh_www webview", "网页验证回调后未读到可保存的 Cookie"); } catch (e) {}
-      return false;
-    }
-    const cookie = names.map((name) => `${name}=${cookies[name]}`).join("; ");
-    this.saveData("login_cookie", cookie);
-    try { log("info", "baozimh_www webview", `已同步网页 Cookie，名称=[${names.join(", ")}]`); } catch (e) {}
-    return true;
   }
-
   // ---------------------------------------------------------------------------
   // 账号:网页登录 (同时用于通过验证 / 登录站点账号以使用书架)
   // ---------------------------------------------------------------------------
   account = {
-    // Cookie 登录优先：校验通过后保存为源数据，所有包子页面请求都会优先使用。
-    // 不声明 account.login，避免宿主按规则把账号密码登录排在 Cookie 登录之前。
+    // Cookie 表单为 WebView 会话的备用方式；校验通过后保存，仅在 WebView Cookie 被拒绝时尝试。
+    // 不声明 account.login，确保不会让账号密码登录优先于 WebView/Cookie 验证流程。
     loginWithCookies: {
       fields: ["Cookie"],
       validate: async (values) => {
@@ -457,12 +448,14 @@ class BaozimhWww extends ComicSource {
         // 已离开验证入口,回到站点正常页面
         return true;
       },
-      onLoginSuccess: () => this.captureWebviewCookies(),
+      onLoginSuccess: () => this.logWebviewCookieState(),
     },
 
     logout: () => {
       this.deleteData("login_cookie");
-      Network.deleteCookies(this.baseUrl);
+      for (const host of [this.baseUrl, "https://www.baozimh.com/", "https://cn.baozimh.com/", "https://tw.baozimh.com/"]) {
+        try { Network.deleteCookies(host); } catch (e) {}
+      }
     },
 
     registerWebsite: "https://www.baozimh.com/user/signup",
