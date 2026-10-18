@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.3.0";
+  version = "1.4.0";
 
   minAppVersion = "1.6.0";
 
@@ -91,7 +91,7 @@ class BaozimhWww extends ComicSource {
         const url = this.baseUrl;
         try {
           // 检查所选域名本身，不触发自动切换，结果才可用于判断当前设置。
-          const res = await Network.get(url, this.siteHeaders(url));
+          const res = await Network.get(url, { ...this.siteHeaders(url), "cache-time": "no", "prevent-parallel": "true" });
           try {
             log("info", "baozimh_www connection check",
               `GET ${url} -> ${res.status} cookieSource=${this.loadData("login_cookie") ? "loginWithCookies" : (this.loadSetting("cookie") ? "fallback-setting" : "none")} manualUA=${!!this.siteHeaders(url)["User-Agent"]}`);
@@ -281,39 +281,67 @@ class BaozimhWww extends ComicSource {
   }
 
   /**
-   * 统一的 GET 请求:处理验证页与状态码
+   * 统一 GET：先使用 Cookie 登录保存的 Cookie；遇到验证/拒绝时再尝试备用手动 Cookie。
    */
   async request(url, headers = {}) {
     const urls = this.mainRequestUrls(url);
+    const primaryCookie = String(this.loadData("login_cookie") || "").trim();
+    const fallbackCookie = String(this.loadSetting("cookie") || "").replace(/^cookie:\s*/i, "").trim();
+    const cookieCandidates = [];
+    if (primaryCookie) cookieCandidates.push({ value: primaryCookie, source: "loginWithCookies" });
+    if (fallbackCookie && fallbackCookie !== primaryCookie) cookieCandidates.push({ value: fallbackCookie, source: "fallback-setting" });
+    if (cookieCandidates.length === 0) cookieCandidates.push({ value: "", source: "app-cookie-jar" });
+
     let lastError = null;
     for (let i = 0; i < urls.length; i++) {
       const targetUrl = urls[i];
-      let res;
-      try {
-        res = await Network.get(targetUrl, { ...this.siteHeaders(targetUrl), ...headers });
-      } catch (e) {
-        lastError = e;
+      let res = null;
+      let usedCookieSource = "app-cookie-jar";
+      for (let c = 0; c < cookieCandidates.length; c++) {
+        const candidate = cookieCandidates[c];
+        const requestHeaders = { ...this.siteHeaders(targetUrl), ...headers };
+        if (candidate.value && this.isBaoziPageHost(this.requestHost(targetUrl))) {
+          requestHeaders.Cookie = candidate.value;
+        }
+        try {
+          res = await Network.get(targetUrl, requestHeaders);
+          usedCookieSource = candidate.source;
+        } catch (e) {
+          lastError = e;
+          // Cookie 不会修复传输层故障；直接交给域名备用逻辑处理。
+          break;
+        }
+        const denied = this.isChallenge(res) || [401, 403].includes(Number(res.status));
+        if (denied && c + 1 < cookieCandidates.length) {
+          try { log("warning", "baozimh_www", `Cookie ${candidate.source} 被拒绝，改试备用 Cookie: ${targetUrl}`); } catch (ignored) {}
+          continue;
+        }
+        break;
+      }
+
+      if (!res) {
         try { log("warning", "baozimh_www", `网络请求失败，尝试备用域名 (${i + 1}/${urls.length}): ${targetUrl}`); } catch (ignored) {}
         if (i + 1 < urls.length) continue;
-        throw `网络连接失败 (已尝试 ${i + 1} 个域名): ${String(lastError)}`;
+        throw `网络连接失败 (已尝试 ${i + 1} 个域名): ${String(lastError || "未知错误")}`;
       }
 
       try {
         log("info", "baozimh_www v" + this.version,
-          `GET ${targetUrl} -> ${res.status} (len ${(res.body || "").length}) cookieSource=${this.loadData("login_cookie") ? "loginWithCookies" : (this.loadSetting("cookie") ? "fallback-setting" : "none")} manualUA=${!!this.siteHeaders(targetUrl)["User-Agent"]}`);
+          `GET ${targetUrl} -> ${res.status} (len ${(res.body || "").length}) cookieSource=${usedCookieSource} manualUA=${!!this.siteHeaders(targetUrl)["User-Agent"]}`);
       } catch (e) {}
 
       if (this.isChallenge(res)) {
         try {
-          const cookieNames = (Network.getCookies(targetUrl) || []).map((c) => c.name).join(",");
+          const cookieNames = (Network.getCookies(targetUrl) || []).map((c) => c.name).filter(Boolean).join(",");
+          const contentType = res.headers && (res.headers["content-type"] || res.headers["Content-Type"] || "unknown");
           log("error", "baozimh_www v" + this.version,
-            `CHALLENGE url=${targetUrl} status=${res.status} cookies=[${cookieNames}] body=${(res.body || "").replace(/\s+/g, " ").slice(0, 300)}`);
+            `CHALLENGE url=${targetUrl} status=${res.status} contentType=${contentType} cookieNames=[${cookieNames}]`);
         } catch (e) {}
         throw this.challengeMessage;
       }
       if (res.status === 200) return res;
 
-      // 仅网络异常及常见临时服务错误会切换域名；404、限流、验证和其他 4xx 不重试。
+      // 仅网络异常及常见临时服务错误会切换域名；404、限流和其他 4xx 不切换。
       const retryableStatus = [500, 502, 503, 504].includes(Number(res.status));
       if (retryableStatus && i + 1 < urls.length) {
         try { log("warning", "baozimh_www", `HTTP ${res.status}，尝试备用域名 (${i + 2}/${urls.length})`); } catch (e) {}
@@ -336,6 +364,30 @@ class BaozimhWww extends ComicSource {
     }
   }
 
+  /**
+   * WebView 成功后读取宿主已捕获的 Cookie 并同步保存到源数据。
+   * 不记录 Cookie 值；仅记录 Cookie 名称用于诊断。
+   */
+  captureWebviewCookies() {
+    const cookies = {};
+    for (const url of [this.baseUrl, "https://www.baozimh.com/"]) {
+      try {
+        for (const item of Network.getCookies(url) || []) {
+          if (item && item.name && item.value != null) cookies[item.name] = String(item.value);
+        }
+      } catch (e) {}
+    }
+    const names = Object.keys(cookies);
+    if (names.length === 0) {
+      try { log("warning", "baozimh_www webview", "网页验证回调后未读到可保存的 Cookie"); } catch (e) {}
+      return false;
+    }
+    const cookie = names.map((name) => `${name}=${cookies[name]}`).join("; ");
+    this.saveData("login_cookie", cookie);
+    try { log("info", "baozimh_www webview", `已同步网页 Cookie，名称=[${names.join(", ")}]`); } catch (e) {}
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // 账号:网页登录 (同时用于通过验证 / 登录站点账号以使用书架)
   // ---------------------------------------------------------------------------
@@ -354,6 +406,8 @@ class BaozimhWww extends ComicSource {
           const res = await Network.get(url, {
             ...this.siteHeaders(url),
             Cookie: cookie,
+            "cache-time": "no",
+            "prevent-parallel": "true",
           });
           if (this.isChallenge(res) || Number(res.status) !== 200) return false;
           this.saveData("login_cookie", cookie);
@@ -403,7 +457,7 @@ class BaozimhWww extends ComicSource {
         // 已离开验证入口,回到站点正常页面
         return true;
       },
-      onLoginSuccess: () => {},
+      onLoginSuccess: () => this.captureWebviewCookies(),
     },
 
     logout: () => {
