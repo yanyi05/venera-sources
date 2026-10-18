@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.1.3";
+  version = "1.1.4";
 
   minAppVersion = "1.6.0";
 
@@ -69,6 +69,36 @@ class BaozimhWww extends ComicSource {
       ],
       default: "/w640",
     },
+    connection_check: {
+      title: "连接检查",
+      type: "callback",
+      buttonText: "检查当前域名",
+      callback: async () => {
+        const url = this.baseUrl;
+        try {
+          // 检查所选域名本身，不触发自动切换，结果才可用于判断当前设置。
+          const res = await Network.get(url, this.siteHeaders(url));
+          try {
+            log("info", "baozimh_www connection check",
+              `GET ${url} -> ${res.status} manualCookie=${!!this.siteHeaders(url).Cookie} manualUA=${!!this.siteHeaders(url)["User-Agent"]}`);
+          } catch (ignored) {}
+          if (this.isChallenge(res)) {
+            UI.showMessage("当前域名返回了网站验证页；请检查 Cookie 和 User-Agent 设置。");
+            return;
+          }
+          if (res.status === 200) {
+            const cookie = !!this.siteHeaders(url).Cookie;
+            const ua = !!this.siteHeaders(url)["User-Agent"];
+            UI.showMessage(`连接成功：${this.host} (HTTP 200)；手动 Cookie：${cookie ? "已填写" : "未填写"}；User-Agent：${ua ? "已填写" : "未填写"}`);
+            return;
+          }
+          UI.showMessage(`${this.host}：${this.statusMessage(res.status, false)}`);
+        } catch (e) {
+          try { log("error", "baozimh_www connection check", String(e)); } catch (ignored) {}
+          UI.showMessage(`连接失败：${String(e)}`);
+        }
+      },
+    },
   };
 
   get host() {
@@ -93,7 +123,7 @@ class BaozimhWww extends ComicSource {
   //   3. 验证过期后重复第 2 步即可。
   // ---------------------------------------------------------------------------
   get challengeMessage() {
-    return "需要通过网站验证:请在浏览器中打开 www.baozimh.com 完成验证,然后把 Cookie 和 User-Agent 填入本源设置 (见使用说明)";
+    return `需要通过网站验证:请在浏览器中打开 ${this.host} 完成验证,然后把 Cookie 和 User-Agent 填入本源设置`;
   }
 
   /**
@@ -132,6 +162,26 @@ class BaozimhWww extends ComicSource {
 
   isBaoziImageHost(host) {
     return /^(?:[a-z0-9-]+\.)*(?:baozimh\.com|baozicdn\.com|bzcdn\.net)$/i.test(host);
+  }
+
+  mainRequestUrls(url) {
+    const match = String(url || "").match(/^(https?:\/\/)([^/?#]+)([^?#]*)([?#].*)?$/i);
+    if (!match) return [url];
+    const host = match[2].toLowerCase();
+    const allowedHosts = this.settings.host.options.map((option) => option.value);
+    if (!allowedHosts.includes(host)) return [url];
+    const pathAndQuery = (match[3] || "/") + (match[4] || "");
+    return [host, ...allowedHosts.filter((candidate) => candidate !== host)]
+      .map((candidate) => `${match[1]}${candidate}${pathAndQuery}`);
+  }
+
+  statusMessage(status, fallbackTried = true) {
+    status = Number(status);
+    if (status === 401 || status === 403) return `请求被拒绝 (HTTP ${status})；请检查 Cookie、User-Agent 或站点登录状态。`;
+    if (status === 404) return "页面或作品不存在 (HTTP 404)；未切换域名。";
+    if (status === 429) return "请求过于频繁 (HTTP 429)；请稍后再试，未切换域名。";
+    if ([500, 502, 503, 504].includes(status)) return `站点暂时不可用 (HTTP ${status})；${fallbackTried ? "已尝试备用域名" : "检查按钮未切换域名"}。`;
+    return `站点返回 HTTP ${status}`;
   }
 
   /** 手动 Cookie 只发往包子站点；图片 CDN 请求仅按需带 UA 与 Referer。 */
@@ -200,45 +250,44 @@ class BaozimhWww extends ComicSource {
    * 统一的 GET 请求:处理验证页与状态码
    */
   async request(url, headers = {}) {
-    let res;
-    try {
-      res = await Network.get(url, { ...this.siteHeaders(url), ...headers });
-    } catch (e) {
-      throw "网络错误: " + e;
-    }
-    try {
-      log(
-        "info",
-        "baozimh_www v" + this.version,
-        `GET ${url} -> ${res.status} (len ${(res.body || "").length}) manualCookie=${!!this.siteHeaders(url)["Cookie"]} manualUA=${!!this.siteHeaders(url)["User-Agent"]}`
-      );
-    } catch (e) {}
-    if (this.isChallenge(res)) {
-      // 诊断信息:服务器返回了什么、我们当前带着哪些 Cookie
+    const urls = this.mainRequestUrls(url);
+    let lastError = null;
+    for (let i = 0; i < urls.length; i++) {
+      const targetUrl = urls[i];
+      let res;
       try {
-        let cookieNames = "";
-        try {
-          cookieNames = (Network.getCookies(url) || [])
-            .map((c) => c.name)
-            .join(",");
-        } catch (e) {
-          cookieNames = "getCookies失败:" + e;
-        }
-        log(
-          "error",
-          "baozimh_www v" + this.version,
-          `CHALLENGE url=${url} status=${res.status} ` +
-            `headers=${JSON.stringify(res.headers || {}).slice(0, 600)} ` +
-            `cookies=[${cookieNames}] ` +
-            `body=${(res.body || "").replace(/\s+/g, " ").slice(0, 300)}`
-        );
+        res = await Network.get(targetUrl, { ...this.siteHeaders(targetUrl), ...headers });
+      } catch (e) {
+        lastError = e;
+        try { log("warning", "baozimh_www", `网络请求失败，尝试备用域名 (${i + 1}/${urls.length}): ${targetUrl}`); } catch (ignored) {}
+        if (i + 1 < urls.length) continue;
+        throw `网络连接失败 (已尝试 ${i + 1} 个域名): ${String(lastError)}`;
+      }
+
+      try {
+        log("info", "baozimh_www v" + this.version,
+          `GET ${targetUrl} -> ${res.status} (len ${(res.body || "").length}) manualCookie=${!!this.siteHeaders(targetUrl).Cookie} manualUA=${!!this.siteHeaders(targetUrl)["User-Agent"]}`);
       } catch (e) {}
-      throw this.challengeMessage;
+
+      if (this.isChallenge(res)) {
+        try {
+          const cookieNames = (Network.getCookies(targetUrl) || []).map((c) => c.name).join(",");
+          log("error", "baozimh_www v" + this.version,
+            `CHALLENGE url=${targetUrl} status=${res.status} cookies=[${cookieNames}] body=${(res.body || "").replace(/\s+/g, " ").slice(0, 300)}`);
+        } catch (e) {}
+        throw this.challengeMessage;
+      }
+      if (res.status === 200) return res;
+
+      // 仅网络异常及常见临时服务错误会切换域名；404、限流、验证和其他 4xx 不重试。
+      const retryableStatus = [500, 502, 503, 504].includes(Number(res.status));
+      if (retryableStatus && i + 1 < urls.length) {
+        try { log("warning", "baozimh_www", `HTTP ${res.status}，尝试备用域名 (${i + 2}/${urls.length})`); } catch (e) {}
+        continue;
+      }
+      throw this.statusMessage(res.status);
     }
-    if (res.status !== 200) {
-      throw "Invalid status code: " + res.status;
-    }
-    return res;
+    throw `网络连接失败: ${String(lastError || "未知错误")}`;
   }
 
   /**
@@ -519,7 +568,7 @@ class BaozimhWww extends ComicSource {
         throw this.challengeMessage;
       }
       if (!res.status || res.status >= 400) {
-        throw "Invalid status code: " + res.status;
+        throw this.statusMessage(res.status);
       }
       return "ok";
     },
