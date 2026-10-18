@@ -34,7 +34,7 @@ class Baozi extends ComicSource {
         { value: "twmanga.com" },
         { value: "dinnerku.com" },
       ],
-      default: "bzmgcn.com",
+      default: "www.baozimh.com",
     },
     cdn_domains: {
       title: "图片资源站域名",
@@ -504,9 +504,9 @@ class Baozi extends ComicSource {
       const doc = new HtmlDocument(res.body);
 
       // 解析当前页图片(App 版)
-      const imageNodes = doc.querySelectorAll(".comic-contain > .chapter-img");
+      const imageNodes = doc.querySelectorAll(".comic-contain amp-img");
       imageNodes.forEach((imgNode) => {
-        let imgUrl = imgNode.querySelector(".comic-contain__item")?.attributes?.["data-src"];
+        let imgUrl = imgNode.attributes?.["data-src"] || imgNode.attributes?.["src"];
         if (imgUrl) {
           const match = imgUrl.match(/^(https?:\/\/)?([^/\s:]+)(:\d+)?(\/[a-z]comic\/.*)/);
           if (match) {
