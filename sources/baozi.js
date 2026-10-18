@@ -4,9 +4,9 @@ class BaozimhWww extends ComicSource {
   name = "包子漫画 (www)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozi";
+  key = "baozimh_www";
 
-  version = "1.1.4";
+  version = "1.1.5";
 
   minAppVersion = "1.6.0";
 
@@ -49,13 +49,13 @@ class BaozimhWww extends ComicSource {
       default: "",
     },
     cookie: {
-      title: "验证 Cookie (从浏览器复制)",
+      title: "备用 Cookie (手动粘贴)",
       type: "input",
       validator: null,
       default: "",
     },
     user_agent: {
-      title: "验证时浏览器的 User-Agent",
+      title: "备用 User-Agent (手动填写)",
       type: "input",
       validator: null,
       default: "",
@@ -68,6 +68,20 @@ class BaozimhWww extends ComicSource {
         { value: "", text: "原图" },
       ],
       default: "/w640",
+    },
+    open_verification_page: {
+      title: "网页验证与备用填写",
+      type: "callback",
+      buttonText: "打开验证网页",
+      callback: async () => {
+        const url = `${this.baseUrl}/__gatekeeper_challenge/start?return=%2F`;
+        try {
+          await UI.launchUrl(url);
+          UI.showMessage("已打开当前站点的验证网页。验证完成后，可使用下方 Cookie 和 User-Agent 输入框作为备用；如需由应用网页登录捕获 Cookie，请使用页面底部的“重新登录”。User-Agent 需手动填写。");
+        } catch (e) {
+          UI.showMessage(`无法打开验证网页：${String(e)}`);
+        }
+      },
     },
     connection_check: {
       title: "连接检查",
@@ -123,7 +137,7 @@ class BaozimhWww extends ComicSource {
   //   3. 验证过期后重复第 2 步即可。
   // ---------------------------------------------------------------------------
   get challengeMessage() {
-    return `需要通过网站验证:请在浏览器中打开 ${this.host} 完成验证,然后把 Cookie 和 User-Agent 填入本源设置`;
+    return `需要通过网站验证:请使用“打开验证网页”完成验证;需要自动保存 Cookie 时可使用源页面底部的“重新登录”;也可在本源设置中手动填写备用 Cookie 和 User-Agent`;
   }
 
   /**
