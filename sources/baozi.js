@@ -28,6 +28,7 @@ class Baozi extends ComicSource {
       options: [
         { value: "bzmgcn.com" },
         { value: "baozimhcn.com" },
+        { value: "www.baozimh.com" },
         { value: "webmota.com" },
         { value: "kukuc.co" },
         { value: "twmanga.com" },
@@ -71,6 +72,11 @@ class Baozi extends ComicSource {
   }
   get baseUrl() {
     let domain = this.loadSetting("domains") || this.settings.domains.default;
+  
+    if (domain.startsWith("www.")) {
+      return `https://${domain}`;
+    }
+  
     return `https://${this.lang}.${domain}`;
   }
 
