@@ -1,12 +1,12 @@
 /** @type {import('./_venera_.js')} */
 
 class BaozimhWww extends ComicSource {
-  name = "包子漫画 (www)";
+  name = "包子漫画 (yyya)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.2.1";
+  version = "1.3.0";
 
   minAppVersion = "1.6.0";
 
@@ -94,18 +94,18 @@ class BaozimhWww extends ComicSource {
           const res = await Network.get(url, this.siteHeaders(url));
           try {
             log("info", "baozimh_www connection check",
-              `GET ${url} -> ${res.status} manualCookie=${!!this.siteHeaders(url).Cookie} manualUA=${!!this.siteHeaders(url)["User-Agent"]}`);
+              `GET ${url} -> ${res.status} cookieSource=${this.loadData("login_cookie") ? "loginWithCookies" : (this.loadSetting("cookie") ? "fallback-setting" : "none")} manualUA=${!!this.siteHeaders(url)["User-Agent"]}`);
           } catch (ignored) {}
           if (this.isChallenge(res)) {
             UI.showMessage("当前域名返回了网站验证页；请检查 Cookie 和 User-Agent 设置。");
             return;
           }
           if (res.status === 200) {
-            const cookie = !!this.siteHeaders(url).Cookie;
+            const cookie = this.loadData("login_cookie") ? "Cookie 登录（优先）" : (this.loadSetting("cookie") ? "备用手动 Cookie" : "未设置 Cookie");
             const ua = !!this.siteHeaders(url)["User-Agent"];
             const appCookies = (Network.getCookies(url) || []).map((item) => item.name).filter(Boolean);
             const appCookieState = appCookies.length ? `应用 Cookie：已检测到 (${appCookies.join(", ")})` : "应用 Cookie：未检测到";
-            UI.showMessage(`连接成功：${this.host} (HTTP 200)；${appCookieState}；手动 Cookie：${cookie ? "已填写" : "未填写"}；User-Agent：${ua ? "已启用" : "未启用"}`);
+            UI.showMessage(`连接成功：${this.host} (HTTP 200)；${appCookieState}；当前 Cookie 来源：${cookie}；User-Agent：${ua ? "已启用" : "未启用"}`);
             return;
           }
           UI.showMessage(`${this.host}：${this.statusMessage(res.status, false)}`);
@@ -139,7 +139,7 @@ class BaozimhWww extends ComicSource {
   //   3. 验证过期后重复第 2 步即可。
   // ---------------------------------------------------------------------------
   get challengeMessage() {
-    return `需要通过网站验证:请使用“打开当前站点”打开 ${this.host};应用网页登录捕获 Cookie 请使用页面底部的“重新登录”;User-Agent 需从浏览器 F12 Network 手动复制到设置中`;
+    return `需要通过网站验证:请先在 Cookie 登录入口填写并校验 Cookie；若暂不可用，可在“备用 Cookie”设置手动粘贴。也可使用“打开当前站点”完成网页登录。User-Agent 需在设置中填写。`;
   }
 
   /**
@@ -209,7 +209,10 @@ class BaozimhWww extends ComicSource {
     if (!pageHost && !imageHost) return h;
 
     const clean = (value) => String(value || "").replace(/[\r\n]+/g, "").trim();
-    const cookie = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
+    // Cookie 登录是首选来源;“备用 Cookie”设置仅在登录 Cookie 为空时使用。
+    const primaryCookie = clean(this.loadData("login_cookie"));
+    const fallbackCookie = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
+    const cookie = primaryCookie || fallbackCookie;
     const ua = clean(this.loadSetting("user_agent") || this.settings.user_agent.default).replace(/^user-agent:\s*/i, "");
     if (pageHost && !options.forImage && cookie) h.Cookie = cookie;
     if (ua) h["User-Agent"] = ua;
@@ -297,7 +300,7 @@ class BaozimhWww extends ComicSource {
 
       try {
         log("info", "baozimh_www v" + this.version,
-          `GET ${targetUrl} -> ${res.status} (len ${(res.body || "").length}) manualCookie=${!!this.siteHeaders(targetUrl).Cookie} manualUA=${!!this.siteHeaders(targetUrl)["User-Agent"]}`);
+          `GET ${targetUrl} -> ${res.status} (len ${(res.body || "").length}) cookieSource=${this.loadData("login_cookie") ? "loginWithCookies" : (this.loadSetting("cookie") ? "fallback-setting" : "none")} manualUA=${!!this.siteHeaders(targetUrl)["User-Agent"]}`);
       } catch (e) {}
 
       if (this.isChallenge(res)) {
@@ -337,42 +340,30 @@ class BaozimhWww extends ComicSource {
   // 账号:网页登录 (同时用于通过验证 / 登录站点账号以使用书架)
   // ---------------------------------------------------------------------------
   account = {
-    // 包子漫画站点账号登录：取得 TSID 账号 Cookie；此登录与 Cloudflare/Gatekeeper 验证分开。
-    login: async (account, password) => {
-      const url = `${this.baseUrl}/api/bui/signin`;
-      const boundary = "----WebKitFormBoundaryFUNUxpOwyUaDop8s";
-      const body =
-        `--${boundary}\r\nContent-Disposition: form-data; name="username"\r\n\r\n${account}\r\n` +
-        `--${boundary}\r\nContent-Disposition: form-data; name="password"\r\n\r\n${password}\r\n` +
-        `--${boundary}--\r\n`;
-      const res = await Network.post(
-        url,
-        {
-          ...this.siteHeaders(url),
-          "content-type": `multipart/form-data; boundary=${boundary}`,
-        },
-        body
-      );
-      if (this.isChallenge(res)) {
-        throw this.challengeMessage;
-      }
-      if (Number(res.status) !== 200) {
-        throw `账号登录失败 (HTTP ${res.status})`;
-      }
-      let json;
-      try {
-        json = JSON.parse(res.body || "{}");
-      } catch (e) {
-        throw "账号登录失败：站点返回内容无法解析";
-      }
-      const token = json && json.data != null ? String(json.data).trim() : "";
-      if (!token || token === "null" || token === "undefined") {
-        throw (json && (json.message || json.msg)) || "账号或密码不正确，或站点未返回登录凭据";
-      }
-      Network.setCookies(this.baseUrl, [
-        new Cookie({ name: "TSID", value: token, domain: "baozimh.com" }),
-      ]);
-      return "ok";
+    // Cookie 登录优先：校验通过后保存为源数据，所有包子页面请求都会优先使用。
+    // 不声明 account.login，避免宿主按规则把账号密码登录排在 Cookie 登录之前。
+    loginWithCookies: {
+      fields: ["Cookie"],
+      validate: async (values) => {
+        const raw = Array.isArray(values) ? values[0] : (values && (values.Cookie || values.cookie));
+        const cookie = String(raw || "").replace(/[\r\n]+/g, "").trim().replace(/^cookie:\s*/i, "");
+        if (!cookie || !/^[^=;\s]+\s*=/.test(cookie)) return false;
+        const url = `${this.baseUrl}/`;
+        try {
+          // 新版宿主会在调用 validate 前应用表单 Cookie;这里显式传入，确保当前验证请求使用刚填写的值。
+          const res = await Network.get(url, {
+            ...this.siteHeaders(url),
+            Cookie: cookie,
+          });
+          if (this.isChallenge(res) || Number(res.status) !== 200) return false;
+          this.saveData("login_cookie", cookie);
+          try { log("info", "baozimh_www cookie login", `Cookie 校验通过: host=${this.host}`); } catch (e) {}
+          return true;
+        } catch (e) {
+          try { log("error", "baozimh_www cookie login", `Cookie 校验请求失败: ${String(e)}`); } catch (ignored) {}
+          return false;
+        }
+      },
     },
 
     loginWithWebview: {
@@ -416,6 +407,7 @@ class BaozimhWww extends ComicSource {
     },
 
     logout: () => {
+      this.deleteData("login_cookie");
       Network.deleteCookies(this.baseUrl);
     },
 
