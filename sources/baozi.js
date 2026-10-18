@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozimh_www";
 
-  version = "1.1.1";
+  version = "1.1.3";
 
   minAppVersion = "1.6.0";
 
@@ -107,40 +107,93 @@ class BaozimhWww extends ComicSource {
    */
   isChallenge(res) {
     const body = typeof res.body === "string" ? res.body : "";
-    if (res.status === 403 || res.status === 503 || res.status === 429) {
+    const status = Number(res.status);
+    // 只有响应包含站点明确的挑战信号时才提示验证；普通 403/429/503 保留为状态码错误。
+    if (body.length < 20000 && /"error"\s*:\s*"challenge_required"/i.test(body)) {
       return true;
     }
-    if (res.status === 200) {
-      // 仅当响应本身就是那个很短的 JSON 验证提示时才算
-      if (body.length < 2000 && body.includes('"challenge_required"')) {
-        return true;
-      }
-      // Cloudflare 的验证页标题
-      const head = body.slice(0, 3000);
-      return /<title>\s*(Just a moment|Attention Required|请稍候|Checking your browser)/i.test(
-        head
-      );
-    }
-    return false;
+    const head = body.slice(0, 10000);
+    const challengeTitle = /<title[^>]*>\s*(Just a moment|Attention Required|请稍候|Checking your browser)/i.test(head);
+    const cloudflareMarker = /(?:cf-chl-|challenge-platform|__cf_chl|cf-browser-verification)/i.test(head);
+    return challengeTitle || (cloudflareMarker && [200, 403, 429, 503].includes(status));
   }
 
   /**
    * 站点请求头:仅对本站域名附带用户填写的 Cookie / User-Agent
    */
-  siteHeaders(url) {
+  requestHost(url) {
+    const match = String(url || "").match(/^https?:\/\/([^/:?#]+)/i);
+    return match ? match[1].toLowerCase().replace(/\.$/, "") : "";
+  }
+
+  isBaoziPageHost(host) {
+    return /^(?:[a-z0-9-]+\.)*baozimh\.com$/i.test(host);
+  }
+
+  isBaoziImageHost(host) {
+    return /^(?:[a-z0-9-]+\.)*(?:baozimh\.com|baozicdn\.com|bzcdn\.net)$/i.test(host);
+  }
+
+  /** 手动 Cookie 只发往包子站点；图片 CDN 请求仅按需带 UA 与 Referer。 */
+  siteHeaders(url, options = {}) {
     const h = {};
-    if (!url || !url.startsWith(this.baseUrl)) {
-      return h;
-    }
-    const cookie = (this.loadSetting("cookie") || "").replace(/[\r\n]+/g, "").trim();
-    const ua = (this.loadSetting("user_agent") || "").replace(/[\r\n]+/g, "").trim();
-    if (cookie) {
-      h["Cookie"] = cookie.replace(/^cookie:\s*/i, "");
-    }
-    if (ua) {
-      h["User-Agent"] = ua;
-    }
+    const host = this.requestHost(url);
+    const pageHost = this.isBaoziPageHost(host);
+    const imageHost = options.forImage === true && this.isBaoziImageHost(host);
+    if (!pageHost && !imageHost) return h;
+
+    const clean = (value) => String(value || "").replace(/[\r\n]+/g, "").trim();
+    const cookie = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
+    const ua = clean(this.loadSetting("user_agent")).replace(/^user-agent:\s*/i, "");
+    if (pageHost && !options.forImage && cookie) h.Cookie = cookie;
+    if (ua) h["User-Agent"] = ua;
     return h;
+  }
+
+  imageLoadConfig(url, candidateIndex = 0) {
+    const match = String(url || "").match(/^(https?:\/\/)([^/?#]+)([^?#]*)([?#].*)?$/i);
+    const originalHost = match ? match[2].toLowerCase() : "";
+    const pathAndQuery = match ? (match[3] || "/") + (match[4] || "") : "";
+    const candidates = [];
+    const addHost = (host) => {
+      host = String(host || "").trim().toLowerCase();
+      if (!host || candidates.some((item) => item.host === host)) return;
+      candidates.push({ host: host, url: match ? `${match[1]}${host}${pathAndQuery}` : url });
+    };
+
+    // 优先使用当前图片地址（已遵从用户选择的 CDN），失败后依次尝试其他已知 CDN。
+    addHost(originalHost);
+    addHost(this.loadSetting("cdn_domains") || "");
+    for (const host of [
+      "as-rsa1-usla.baozicdn.com",
+      "ascn-a3.bzcdn.net",
+      "asgb-a3.bzcdn.net",
+      "as.baozimh.com",
+      "s1.baozicdn.com",
+    ]) addHost(host);
+
+    const index = Math.max(0, Math.min(candidates.length - 1, candidateIndex || 0));
+    const target = candidates[index] || { host: originalHost, url: url };
+    const headers = this.siteHeaders(target.url, { forImage: true });
+    if (this.isBaoziImageHost(target.host)) headers.Referer = this.baseUrl + "/";
+
+    const config = { url: target.url };
+    if (Object.keys(headers).length > 0) config.headers = headers;
+    if (index + 1 < candidates.length) {
+      config.onLoadFailed = () => {
+        const nextIndex = index + 1;
+        try {
+          log("warning", "baozimh_www image", `图片请求失败，切换 CDN ${target.host} -> ${candidates[nextIndex].host}`);
+        } catch (e) {}
+        return this.imageLoadConfig(url, nextIndex);
+      };
+    } else {
+      config.onLoadFailed = () => {
+        try { log("error", "baozimh_www image", `所有备用 CDN 均失败，最后地址=${target.url}`); } catch (e) {}
+        return null;
+      };
+    }
+    return config;
   }
 
   /**
@@ -501,6 +554,10 @@ class BaozimhWww extends ComicSource {
   // 漫画详情与章节
   // ---------------------------------------------------------------------------
   comic = {
+    // 正文图片与封面缩略图由应用单独下载，不会继承页面请求头；在此按目标主机配置。
+    onImageLoad: (url) => this.imageLoadConfig(url),
+    onThumbnailLoad: (url) => this.imageLoadConfig(url),
+
     loadInfo: async (id) => {
       const res = await this.request(`${this.baseUrl}/comic/${id}`);
       const html = res.body;
