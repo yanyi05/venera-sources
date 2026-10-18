@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozimh_www";
 
-  version = "1.1.9";
+  version = "1.2.1";
 
   minAppVersion = "1.6.0";
 
@@ -216,6 +216,21 @@ class BaozimhWww extends ComicSource {
     return h;
   }
 
+  /**
+   * 缩略图配置必须保持同步且不携带 onLoadFailed 回调。
+   * Venera Next 当前不支持缩略图失败回调;携带闭包可能在下载封面时触发已关闭的 JS scope。
+   */
+  thumbnailLoadConfig(url) {
+    const targetUrl = String(url || "");
+    const headers = this.siteHeaders(targetUrl, { forImage: true });
+    if (this.isBaoziImageHost(this.requestHost(targetUrl))) {
+      headers.Referer = this.baseUrl + "/";
+    }
+    const config = { url: targetUrl };
+    if (Object.keys(headers).length > 0) config.headers = headers;
+    return config;
+  }
+
   imageLoadConfig(url, candidateIndex = 0) {
     const match = String(url || "").match(/^(https?:\/\/)([^/?#]+)([^?#]*)([?#].*)?$/i);
     const originalHost = match ? match[2].toLowerCase() : "";
@@ -415,28 +430,61 @@ class BaozimhWww extends ComicSource {
    */
   normalizeImg(u) {
     if (!u) return "";
-    u = String(u).trim().split(",")[0].trim().split(/\s+/)[0];
-    if (!u || u.startsWith("data:")) return "";
-    if (/placeholder|loading|lazy|blank|default/i.test(u) && !/\/cover\//.test(u)) {
-      return "";
-    }
+    u = String(u).trim().replace(/&amp;/g, "&");
+    // srcset 可能包含多个候选项;取第一个 URL,并去掉描述符。
+    u = u.split(",")[0].trim().split(/\s+/)[0];
+    if (!u || /^(?:data:|about:|javascript:)/i.test(u)) return "";
+    if (/placeholder|loading|lazy|blank|default/i.test(u) && !/\/cover\//i.test(u)) return "";
     if (u.startsWith("//")) return "https:" + u;
     if (u.startsWith("/")) return this.baseUrl + u;
     return u;
   }
 
   /**
-   * 从卡片里取封面:依次尝试 amp-img / img 的 src、data-src、data-original、srcset;
-   * 都取不到时,按站点封面地址规律由漫画 id 推导 (id 去掉末尾 _xxxxxx 后加 .jpg)
+   * 读取一个图片节点所有常见的懒加载字段,避免 amp-img 占位节点遮住后面的真实 img。
+   */
+  coverFromNode(node) {
+    if (!node) return "";
+    const attrs = node.attributes || {};
+    for (const key of [
+      "data-src", "data-original", "data-original-src", "data-lazy-src",
+      "data-image", "data-cover", "src", "srcset", "data-srcset"
+    ]) {
+      const value = this.normalizeImg(attrs[key]);
+      if (value) return value;
+    }
+    const style = String(attrs.style || "");
+    const bg = style.match(/url\(["']?(.*?)["']?\)/i);
+    return bg ? this.normalizeImg(bg[1]) : "";
+  }
+
+  /**
+   * 封面缩略图使用站点裁切参数降低传输量;已有完整图片 URL 则原样保留。
+   */
+  coverUrl(value, id) {
+    const raw = String(value || "").trim();
+    if (raw) {
+      // API 的 topic_img 有时是文件名,有时已是路径/完整 URL。
+      if (/^https?:\/\//i.test(raw) || raw.startsWith("//")) return this.normalizeImg(raw);
+      const path = raw.replace(/^\/+/, "");
+      const coverPath = /^(?:[a-z0-9-]+\/)*cover\//i.test(path) ? path : `cover/${path}`;
+      return `https://static-tw.baozimh.com/${coverPath}${/[?&](?:w|h|q)=/i.test(coverPath) ? "" : "?w=285&h=375&q=80"}`;
+    }
+    return this.coverFromId(id);
+  }
+
+  /**
+   * 从卡片的全部图片节点寻找有效封面;最后才由 comic id 推导地址。
    */
   coverOf(e, id) {
-    const img = e.querySelector("amp-img") || e.querySelector("img");
-    if (img) {
-      const attrs = img.attributes || {};
-      for (const k of ["data-src", "data-original", "data-lazy-src", "src", "srcset", "data-srcset"]) {
-        const u = this.normalizeImg(attrs[k]);
-        if (u) return u;
-      }
+    for (const img of e.querySelectorAll("amp-img, img")) {
+      const cover = this.coverFromNode(img);
+      if (cover) return cover;
+    }
+    // 有些列表将封面设为卡片背景图。
+    for (const node of e.querySelectorAll("[style]")) {
+      const cover = this.coverFromNode(node);
+      if (cover) return cover;
     }
     return this.coverFromId(id);
   }
@@ -444,7 +492,7 @@ class BaozimhWww extends ComicSource {
   coverFromId(id) {
     if (!id) return "";
     const base = String(id).replace(/_[a-z0-9]{6}$/i, "");
-    return `https://static-tw.baozimh.com/cover/${base}.jpg?w=285&h=375&q=100`;
+    return `https://static-tw.baozimh.com/cover/${base}.jpg?w=285&h=375&q=80`;
   }
 
   parseComic(e) {
@@ -468,7 +516,7 @@ class BaozimhWww extends ComicSource {
       id: e.comic_id,
       title: e.name,
       subtitle: e.author,
-      cover: `https://static-tw.baozimh.com/cover/${e.topic_img}?w=285&h=375&q=100`,
+      cover: this.coverUrl(e.topic_img, e.comic_id),
       tags: e.type_names || [],
     });
   }
@@ -659,7 +707,7 @@ class BaozimhWww extends ComicSource {
   comic = {
     // 正文图片与封面缩略图由应用单独下载，不会继承页面请求头；在此按目标主机配置。
     onImageLoad: (url) => this.imageLoadConfig(url),
-    onThumbnailLoad: (url) => this.imageLoadConfig(url),
+    onThumbnailLoad: (url) => this.thumbnailLoadConfig(url),
 
     loadInfo: async (id) => {
       const res = await this.request(`${this.baseUrl}/comic/${id}`);
@@ -699,11 +747,10 @@ class BaozimhWww extends ComicSource {
           meta("og:title") ||
           pageTitle.split(/[-_|–—]/)[0].trim();
 
+        const detailCoverNode = document.querySelector("div.l-content > div > div > amp-img") ||
+          document.querySelector("div.l-content amp-img, div.l-content img");
         const cover =
-          this.normalizeImg(
-            document.querySelector("div.l-content > div > div > amp-img")
-              ?.attributes?.["src"]
-          ) ||
+          this.coverFromNode(detailCoverNode) ||
           this.normalizeImg(meta("og:image")) ||
           this.coverFromId(id);
 
