@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozimh_www";
 
-  version = "1.1.8";
+  version = "1.1.9";
 
   minAppVersion = "1.6.0";
 
@@ -322,6 +322,44 @@ class BaozimhWww extends ComicSource {
   // 账号:网页登录 (同时用于通过验证 / 登录站点账号以使用书架)
   // ---------------------------------------------------------------------------
   account = {
+    // 包子漫画站点账号登录：取得 TSID 账号 Cookie；此登录与 Cloudflare/Gatekeeper 验证分开。
+    login: async (account, password) => {
+      const url = `${this.baseUrl}/api/bui/signin`;
+      const boundary = "----WebKitFormBoundaryFUNUxpOwyUaDop8s";
+      const body =
+        `--${boundary}\r\nContent-Disposition: form-data; name="username"\r\n\r\n${account}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="password"\r\n\r\n${password}\r\n` +
+        `--${boundary}--\r\n`;
+      const res = await Network.post(
+        url,
+        {
+          ...this.siteHeaders(url),
+          "content-type": `multipart/form-data; boundary=${boundary}`,
+        },
+        body
+      );
+      if (this.isChallenge(res)) {
+        throw this.challengeMessage;
+      }
+      if (Number(res.status) !== 200) {
+        throw `账号登录失败 (HTTP ${res.status})`;
+      }
+      let json;
+      try {
+        json = JSON.parse(res.body || "{}");
+      } catch (e) {
+        throw "账号登录失败：站点返回内容无法解析";
+      }
+      const token = json && json.data != null ? String(json.data).trim() : "";
+      if (!token || token === "null" || token === "undefined") {
+        throw (json && (json.message || json.msg)) || "账号或密码不正确，或站点未返回登录凭据";
+      }
+      Network.setCookies(this.baseUrl, [
+        new Cookie({ name: "TSID", value: token, domain: "baozimh.com" }),
+      ]);
+      return "ok";
+    },
+
     loginWithWebview: {
       // 注意:此处在安装/解析阶段就会被读取,不能调用 loadSetting,必须是固定值
       // 应用内重新登录时直接打开 www 首页;若触发验证,站点完成后会回到正常页面
