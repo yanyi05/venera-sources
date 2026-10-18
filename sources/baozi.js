@@ -1,12 +1,12 @@
 /** @type {import('./_venera_.js')} */
 
 class BaozimhWww extends ComicSource {
-  name = "包子漫画 (yyya)";
+  name = "包子漫画 (www)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozi";
+  key = "baozimh_www";
 
-  version = "1.5.0";
+  version = "1.6.0";
 
   minAppVersion = "1.6.0";
 
@@ -470,8 +470,6 @@ class BaozimhWww extends ComicSource {
   normalizeImg(u) {
     if (!u) return "";
     u = String(u).trim().replace(/&amp;/g, "&");
-    // srcset 可能包含多个候选项;取第一个 URL,并去掉描述符。
-    u = u.split(",")[0].trim().split(/\s+/)[0];
     if (!u || /^(?:data:|about:|javascript:)/i.test(u)) return "";
     if (/placeholder|loading|lazy|blank|default/i.test(u) && !/\/cover\//i.test(u)) return "";
     if (u.startsWith("//")) return "https:" + u;
@@ -479,55 +477,76 @@ class BaozimhWww extends ComicSource {
     return u;
   }
 
-  /**
-   * 读取一个图片节点所有常见的懒加载字段,避免 amp-img 占位节点遮住后面的真实 img。
-   */
-  coverFromNode(node) {
-    if (!node) return "";
+  /** 汇总节点的封面候选：优先真实懒加载字段，再按目标尺寸选择 srcset。 */
+  coverCandidatesFromNode(node) {
+    if (!node) return [];
     const attrs = node.attributes || {};
-    for (const key of [
-      "data-src", "data-original", "data-original-src", "data-lazy-src",
-      "data-image", "data-cover", "src", "srcset", "data-srcset"
-    ]) {
-      const value = this.normalizeImg(attrs[key]);
-      if (value) return value;
+    const candidates = [];
+    const add = (value, score, width = 0) => {
+      const url = this.normalizeImg(value);
+      if (url) candidates.push({ url: url, score: score, width: width });
+    };
+    const fields = [
+      ["data-original", 110], ["data-original-src", 105], ["data-src", 100],
+      ["data-lazy-src", 95], ["data-image", 90], ["data-cover", 85], ["src", 55]
+    ];
+    for (const [key, score] of fields) add(attrs[key], score);
+
+    for (const key of ["data-srcset", "srcset"]) {
+      const srcset = String(attrs[key] || "").replace(/&amp;/g, "&");
+      for (const item of srcset.split(",")) {
+        const match = item.trim().match(/^(\S+)(?:\s+(\d+(?:\.\d+)?)(w|x))?$/i);
+        if (!match) continue;
+        const descriptor = Number(match[2] || 0);
+        const width = match[3] && match[3].toLowerCase() === "x" ? descriptor * 285 : descriptor;
+        const score = 75 - Math.min(40, Math.abs((width || 285) - 285) / 30);
+        add(match[1], score, width);
+      }
     }
+
     const style = String(attrs.style || "");
     const bg = style.match(/url\(["']?(.*?)["']?\)/i);
-    return bg ? this.normalizeImg(bg[1]) : "";
+    if (bg) add(bg[1], 35);
+    return candidates;
   }
 
-  /**
-   * 封面缩略图使用站点裁切参数降低传输量;已有完整图片 URL 则原样保留。
-   */
+  coverFromNode(node) {
+    const candidates = this.coverCandidatesFromNode(node);
+    candidates.sort((a, b) => b.score - a.score || a.url.length - b.url.length);
+    return candidates.length ? candidates[0].url : "";
+  }
+
   coverUrl(value, id) {
     const raw = String(value || "").trim();
     if (raw) {
-      // API 的 topic_img 有时是文件名,有时已是路径/完整 URL。
       if (/^https?:\/\//i.test(raw) || raw.startsWith("//")) return this.normalizeImg(raw);
       const path = raw.replace(/^\/+/, "");
-      const coverPath = /^(?:[a-z0-9-]+\/)*cover\//i.test(path) ? path : `cover/${path}`;
-      return `https://static-tw.baozimh.com/${coverPath}${/[?&](?:w|h|q)=/i.test(coverPath) ? "" : "?w=285&h=375&q=80"}`;
+      const coverPath = /^(?:[a-z0-9-]+\/)*cover\//i.test(path) ? path : "cover/" + path;
+      const separator = coverPath.includes("?") ? "&" : "?";
+      const resize = /[?&](?:w|h|q)=/i.test(coverPath) ? "" : separator + "w=285&h=375&q=80";
+      return "https://static-tw.baozimh.com/" + coverPath + resize;
     }
     return this.coverFromId(id);
   }
 
-  /**
-   * 从卡片的全部图片节点寻找有效封面;最后才由 comic id 推导地址。
-   */
+  /** 汇总卡片中的所有候选并排序；没有有效图片时才按漫画 ID 推导。 */
   coverOf(e, id) {
-    for (const img of e.querySelectorAll("amp-img, img")) {
-      const cover = this.coverFromNode(img);
-      if (cover) return cover;
+    const candidates = [];
+    for (const node of e.querySelectorAll("amp-img, img, [style]")) {
+      candidates.push(...this.coverCandidatesFromNode(node));
     }
-    // 有些列表将封面设为卡片背景图。
-    for (const node of e.querySelectorAll("[style]")) {
-      const cover = this.coverFromNode(node);
-      if (cover) return cover;
+    const bestByUrl = {};
+    for (const item of candidates) {
+      if (!bestByUrl[item.url] || item.score > bestByUrl[item.url].score) bestByUrl[item.url] = item;
     }
+    const ranked = Object.keys(bestByUrl).map((url) => bestByUrl[url]);
+    ranked.sort((a, b) =>
+      b.score - a.score ||
+      Math.abs((a.width || 285) - 285) - Math.abs((b.width || 285) - 285)
+    );
+    if (ranked.length) return ranked[0].url;
     return this.coverFromId(id);
   }
-
   coverFromId(id) {
     if (!id) return "";
     const base = String(id).replace(/_[a-z0-9]{6}$/i, "");
