@@ -1,10 +1,10 @@
 /** @type {import('./_venera_.js')} */
 
 class BaozimhWww extends ComicSource {
-  name = "包子漫画 (www)";
+  name = "包子漫画 (yyya)";
 
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
-  key = "baozimh_www";
+  key = "baozi";
 
   version = "1.6.0";
 
