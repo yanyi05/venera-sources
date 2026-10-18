@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozimh_www";
 
-  version = "1.1.5";
+  version = "1.1.7";
 
   minAppVersion = "1.6.0";
 
@@ -55,10 +55,10 @@ class BaozimhWww extends ComicSource {
       default: "",
     },
     user_agent: {
-      title: "备用 User-Agent (手动填写)",
+      title: "User-Agent (默认固定，可修改)",
       type: "input",
       validator: null,
-      default: "",
+      default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
     },
     image_quality: {
       title: "图片质量",
@@ -70,14 +70,14 @@ class BaozimhWww extends ComicSource {
       default: "/w640",
     },
     open_verification_page: {
-      title: "网页验证与备用填写",
+      title: "打开站点 / 验证信息",
       type: "callback",
-      buttonText: "打开验证网页",
+      buttonText: "打开当前站点",
       callback: async () => {
-        const url = `${this.baseUrl}/__gatekeeper_challenge/start?return=%2F`;
+        const url = `${this.baseUrl}/`;
         try {
           await UI.launchUrl(url);
-          UI.showMessage("已打开当前站点的验证网页。验证完成后，可使用下方 Cookie 和 User-Agent 输入框作为备用；如需由应用网页登录捕获 Cookie，请使用页面底部的“重新登录”。User-Agent 需手动填写。");
+          UI.showMessage("已打开当前选定的包子漫画站点。若需在应用网页登录并保存 Cookie，请使用页面底部的“重新登录”；F12 Network 请求头无法由源脚本自动读取，User-Agent 请手动复制填写。");
         } catch (e) {
           UI.showMessage(`无法打开验证网页：${String(e)}`);
         }
@@ -103,7 +103,9 @@ class BaozimhWww extends ComicSource {
           if (res.status === 200) {
             const cookie = !!this.siteHeaders(url).Cookie;
             const ua = !!this.siteHeaders(url)["User-Agent"];
-            UI.showMessage(`连接成功：${this.host} (HTTP 200)；手动 Cookie：${cookie ? "已填写" : "未填写"}；User-Agent：${ua ? "已填写" : "未填写"}`);
+            const appCookies = (Network.getCookies(url) || []).map((item) => item.name).filter(Boolean);
+            const appCookieState = appCookies.length ? `应用 Cookie：已检测到 (${appCookies.join(", ")})` : "应用 Cookie：未检测到";
+            UI.showMessage(`连接成功：${this.host} (HTTP 200)；${appCookieState}；手动 Cookie：${cookie ? "已填写" : "未填写"}；User-Agent：${ua ? "已启用" : "未启用"}`);
             return;
           }
           UI.showMessage(`${this.host}：${this.statusMessage(res.status, false)}`);
@@ -137,7 +139,7 @@ class BaozimhWww extends ComicSource {
   //   3. 验证过期后重复第 2 步即可。
   // ---------------------------------------------------------------------------
   get challengeMessage() {
-    return `需要通过网站验证:请使用“打开验证网页”完成验证;需要自动保存 Cookie 时可使用源页面底部的“重新登录”;也可在本源设置中手动填写备用 Cookie 和 User-Agent`;
+    return `需要通过网站验证:请使用“打开当前站点”打开 ${this.host};应用网页登录捕获 Cookie 请使用页面底部的“重新登录”;User-Agent 需从浏览器 F12 Network 手动复制到设置中`;
   }
 
   /**
@@ -208,7 +210,7 @@ class BaozimhWww extends ComicSource {
 
     const clean = (value) => String(value || "").replace(/[\r\n]+/g, "").trim();
     const cookie = clean(this.loadSetting("cookie")).replace(/^cookie:\s*/i, "");
-    const ua = clean(this.loadSetting("user_agent")).replace(/^user-agent:\s*/i, "");
+    const ua = clean(this.loadSetting("user_agent") || this.settings.user_agent.default).replace(/^user-agent:\s*/i, "");
     if (pageHost && !options.forImage && cookie) h.Cookie = cookie;
     if (ua) h["User-Agent"] = ua;
     return h;
