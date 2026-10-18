@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozimh_www";
 
-  version = "1.1.7";
+  version = "1.1.8";
 
   minAppVersion = "1.6.0";
 
@@ -324,8 +324,8 @@ class BaozimhWww extends ComicSource {
   account = {
     loginWithWebview: {
       // 注意:此处在安装/解析阶段就会被读取,不能调用 loadSetting,必须是固定值
-      // 直接打开验证入口,验证通过后站点会跳回 return 指定的页面
-      url: "https://www.baozimh.com/__gatekeeper_challenge/start?return=%2F",
+      // 应用内重新登录时直接打开 www 首页;若触发验证,站点完成后会回到正常页面
+      url: "https://www.baozimh.com/",
       /**
        * 判断验证是否完成。应用只有在这里返回 true 之后才会保存网页里的 Cookie,
        * 所以这个函数一直返回 false 的话,验证再通过也不会生效。
