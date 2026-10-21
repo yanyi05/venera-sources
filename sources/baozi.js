@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.6.2";
+  version = "1.6.3";
 
   minAppVersion = "1.6.0";
 
@@ -975,6 +975,22 @@ class BaozimhWww extends ComicSource {
         return `${match[1] || "https://"}${domain}${quality}${match[4]}`;
       };
 
+      // 仅根据图片 URL 中明确的广告/占位资源标记过滤，避免误删正常漫画页和封面。
+      const isExcludedChapterImage = (url) => {
+        try {
+          const pathname = new URL(url).pathname.toLowerCase();
+          const parts = pathname.split('/').filter(Boolean);
+          const filename = parts[parts.length - 1] || '';
+          return parts.some((part) => /^(?:banner|banners|ad|ads|advert|advertisement|recommend|recommendation)$/.test(part)) ||
+            /(?:^|[-_])(banner|advertisement|recommend)(?:[-_.]|$)/.test(filename) ||
+            /(?:^|[-_.])(logo|favicon|loading|404)(?:[-_.]|$)/.test(filename) ||
+            /(?:^|\/)loading\.gif$/.test(pathname) ||
+            /(?:^|\/)404\.png$/.test(pathname) ||
+            /(?:^|\/)favicon(?:\.[^/]*)?$/.test(pathname);
+        } catch (e) {
+          return false;
+        }
+      };
       // 1) App 版页面 (一般无需验证,优先使用)
       let images = [];
       try {
@@ -990,7 +1006,7 @@ class BaozimhWww extends ComicSource {
               node.querySelector(".comic-contain__item")?.attributes?.[
                 "data-src"
               ];
-            if (src) list.push(rewrite(src));
+            if (src && !isExcludedChapterImage(src)) list.push(rewrite(src));
           }
           return list;
         });
@@ -1011,7 +1027,7 @@ class BaozimhWww extends ComicSource {
           )) {
             const src =
               node.attributes?.["src"] || node.attributes?.["data-src"];
-            if (src) list.push(rewrite(src));
+            if (src && !isExcludedChapterImage(src)) list.push(rewrite(src));
           }
           return list;
         });
