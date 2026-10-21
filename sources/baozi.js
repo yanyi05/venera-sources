@@ -6,7 +6,7 @@ class BaozimhWww extends ComicSource {
   // 与旧的 baozi 源使用不同的 key,两者可以同时安装
   key = "baozi";
 
-  version = "1.6.2";
+  version = "1.6.3";
 
   minAppVersion = "1.6.0";
 
@@ -369,24 +369,28 @@ class BaozimhWww extends ComicSource {
     }
   }
 
-  /** WebView 回调中只记录 Cookie 名称，不重组 Cookie 请求头。 */
+  /** WebView 验证成功后保存站点 Cookie 作为备用；原生 WebView Cookie jar 仍是首选。 */
   logWebviewCookieState() {
     try {
-      const names = (Network.getCookies(this.baseUrl) || []).map((item) => item && item.name).filter(Boolean);
-      const nonAnalytics = names.filter((name) => !/^_(?:ga|gid|gat)(?:_|$)/i.test(name));
+      const cookies = Network.getCookies(this.baseUrl) || [];
+      const names = cookies.map((item) => item && item.name).filter(Boolean);
+      const usable = cookies.filter((item) => item && item.name && item.value != null &&
+        !/^_(?:ga|gid|gat)(?:_|$)/i.test(item.name));
       if (!names.length) {
         log("warning", "baozimh_www webview", "WebView 回调后 Cookie jar 暂无可见 Cookie");
-      } else if (!nonAnalytics.length) {
+      } else if (!usable.length) {
         log("warning", "baozimh_www webview",
-          `WebView Cookie jar 仅看到统计 Cookie，不能证明验证已通过；名称=[${names.join(", ")}]`);
+          `WebView Cookie jar 仅看到统计 Cookie，未保存备用登录 Cookie；名称=[${names.join(", ")}]`);
       } else {
-        log("info", "baozimh_www webview", `WebView Cookie jar 可见 Cookie 名称=[${names.join(", ")}]`);
+        const cookie = usable.map((item) => `${item.name}=${item.value}`).join("; ");
+        this.saveData("login_cookie", cookie);
+        log("info", "baozimh_www webview",
+          `验证成功，已保存 ${usable.length} 个站点 Cookie 供后续请求复用`);
       }
     } catch (e) {
-      try { log("warning", "baozimh_www webview", `读取 WebView Cookie 状态失败: ${String(e)}`); } catch (ignored) {}
+      try { log("warning", "baozimh_www webview", `读取或保存 WebView Cookie 失败: ${String(e)}`); } catch (ignored) {}
     }
-  }
-  // ---------------------------------------------------------------------------
+  }  // ---------------------------------------------------------------------------
   // 账号:网页登录 (同时用于通过验证 / 登录站点账号以使用书架)
   // ---------------------------------------------------------------------------
   account = {
@@ -463,13 +467,9 @@ class BaozimhWww extends ComicSource {
       onLoginSuccess: () => this.logWebviewCookieState(),
     },
 
-    logout: () => {
-      this.deleteData("login_cookie");
-      for (const host of [this.baseUrl, "https://www.baozimh.com/", "https://cn.baozimh.com/", "https://tw.baozimh.com/"]) {
-        try { Network.deleteCookies(host); } catch (e) {}
-      }
-    },
-
+    // 注销只让 VeneraNext 重置账号显示状态，不清除站点 Cookie。
+    // 下次点登录时会复用已通过验证的 WebView 会话，避免重复做验证。
+    logout: () => {},
     registerWebsite: "https://www.baozimh.com/user/signup",
   };
 
