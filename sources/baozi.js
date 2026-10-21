@@ -247,10 +247,10 @@ class BaozimhWww extends ComicSource {
       validator: null,
       default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
     },
-    remove_embedded_banner: {
-      title: "移除图片内横幅 (实验)",
+    remove_embedded_banner_experimental_v2: {
+      title: "移除图片内横幅 (实验，默认关闭)",
       type: "switch",
-      default: true,
+      default: false,
     },    image_quality: {
       title: "图片质量",
       type: "select",
@@ -459,7 +459,7 @@ class BaozimhWww extends ComicSource {
     if (this.isBaoziImageHost(target.host)) headers.Referer = this.baseUrl + "/";
 
     const config = { url: target.url };
-    if (this.loadSetting("remove_embedded_banner") !== false) {
+    if (this.loadSetting("remove_embedded_banner_experimental_v2") === true) {
       config.onResponse = (bytes) => BaoziBannerCropper.process(bytes);
     }
     if (Object.keys(headers).length > 0) config.headers = headers;
