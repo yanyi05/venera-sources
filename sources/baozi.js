@@ -3,10 +3,10 @@
 class BaozimhWww extends ComicSource {
   name = "包子漫画 (yyya)";
 
-  // 与旧的 baozi 源使用不同的 key,两者可以同时安装
+  // 保留已有 key，更新后继续使用原来的历史、收藏和设置
   key = "baozi";
 
-  version = "1.6.3";
+  version = "1.6.4";
 
   minAppVersion = "1.6.0";
 
@@ -68,6 +68,18 @@ class BaozimhWww extends ComicSource {
         { value: "", text: "原图" },
       ],
       default: "/w640",
+    },
+    banner_cleanup: {
+      title: "自动移除图片内横幅（实验，需阅读器通用裁切接口）",
+      type: "switch",
+      default: false,
+    },
+    banner_cleanup_help: {
+      title: "横幅裁切说明",
+      type: "callback",
+      buttonText: "查看说明",
+      callback: () => UI.showMessage(
+        "开启后仅处理新加载的正文图片，不处理封面。通过白底、黄色标志与文字布局进行启发式检测，仍可能漏裁或误裁。旧图片请使用阅读器的“重新加载图片”；误裁可在裁切工具中选择“恢复原图”。需要安装 reader-tools-v1 阅读器更新；旧阅读器会保留原图。"),
     },
     open_verification_page: {
       title: "打开站点 / 验证信息",
@@ -268,6 +280,12 @@ class BaozimhWww extends ComicSource {
     if (this.isBaoziImageHost(target.host)) headers.Referer = this.baseUrl + "/";
 
     const config = { url: target.url };
+    // Source owns detection and its switch. Reader only supplies pixel/crop APIs.
+    const cleanup = this.loadSetting("banner_cleanup") ?? false;
+    if ((cleanup === true || cleanup === "true") && this.isBaoziImageHost(target.host)) {
+      config.modifyImage = "function modifyImage(image) { return (" +
+        baoziBannerCleanup.toString() + ")(image); }";
+    }
     if (Object.keys(headers).length > 0) config.headers = headers;
     if (index + 1 < candidates.length) {
       config.onLoadFailed = () => {
@@ -1042,4 +1060,116 @@ class BaozimhWww extends ComicSource {
       },
     },
   };
+}
+
+/** Source-owned heuristic. Runs inside modifyImage without source-instance access. */
+function baoziBannerCleanup(image) {
+  if (!image || typeof image.getPixel !== "function" ||
+      typeof image.removeHorizontalBands !== "function") return image;
+  const width = image.width, height = image.height;
+  if (!Number.isInteger(width) || !Number.isInteger(height) ||
+      width < 400 || height < 300 || width * height > 12000000) return image;
+
+  // Bound JS/native calls even on very tall pages. No network or OCR is used.
+  let remaining = 140000;
+  const pixels = new Map();
+  const pixel = (x, y) => {
+    const key = y * width + x;
+    if (pixels.has(key)) return pixels.get(key);
+    if (--remaining < 0) throw new Error("Pixel sampling budget exceeded");
+    const value = image.getPixel(x, y);
+    if (!value || ![value.r, value.g, value.b, value.a].every(Number.isFinite)) {
+      throw new Error("Invalid pixel");
+    }
+    pixels.set(key, value);
+    return value;
+  };
+  const isWhite = (p) => p.a >= 240 && p.r > 232 && p.g > 232 && p.b > 232;
+  const xStep = Math.max(1, Math.ceil(width / 96));
+  const yStep = Math.max(1, Math.ceil(height / 900));
+  const rowIsWhite = (y) => {
+    let white = 0, count = 0;
+    for (let x = 0; x < width; x += xStep) {
+      if (isWhite(pixel(x, y))) white++;
+      count++;
+    }
+    return white / count >= 0.60;
+  };
+
+  const hasLogoAndText = (top, bottom) => {
+    const bandHeight = bottom - top;
+    const step = Math.max(1, Math.ceil(Math.max(width / 240, bandHeight / 60)));
+    let yellow = 0, dark = 0, darkRight = 0, count = 0;
+    let minX = width, maxX = -1, minY = bottom, maxY = -1;
+    for (let y = top; y < bottom; y += step) {
+      for (let x = Math.floor(width * .32); x < width * .68; x += step) {
+        const p = pixel(x, y);
+        if (p.a < 240) continue;
+        count++;
+        if (x > width * .36 && x < width * .56 &&
+            p.r > 160 && p.g > 100 && p.b < 150 && p.r > p.g * 1.03) {
+          yellow++;
+          minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+          minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        }
+        if (p.r < 90 && p.g < 90 && p.b < 90) {
+          dark++;
+          if (x > width * .53) darkRight++;
+        }
+      }
+    }
+    if (!count || yellow < Math.max(12, Math.ceil(count * .0015))) return false;
+    const logoWidth = maxX - minX + 1, logoHeight = maxY - minY + 1;
+    const center = (minX + maxX) / 2, aspect = logoWidth / logoHeight;
+    return center > width * .37 && center < width * .53 &&
+      logoWidth > width * .025 && logoWidth < width * .12 &&
+      logoHeight > bandHeight * .15 && logoHeight < bandHeight * .9 &&
+      aspect > .55 && aspect < 1.8 &&
+      dark >= Math.max(12, Math.ceil(count * .012)) && darkRight >= 6;
+  };
+
+  try {
+    const candidates = [];
+    let start = null;
+    for (let y = 0; y < height; y += yStep) {
+      if (rowIsWhite(y)) {
+        if (start === null) start = y;
+      } else if (start !== null) {
+        candidates.push([start, y]);
+        start = null;
+      }
+    }
+    if (start !== null) candidates.push([start, height]);
+    const bands = [];
+    const minHeight = Math.max(18, Math.min(height * .025, width * .05));
+    const maxHeight = Math.min(height * .20, width * .6);
+    for (const candidate of candidates) {
+      let [top, bottom] = candidate;
+      // Refine coarse boundaries; never extend into a non-white row.
+      if (top > 0) {
+        for (let y = top - 1; y >= Math.max(0, top - yStep); y--) {
+          if (!rowIsWhite(y)) break;
+          top = y;
+        }
+      }
+      if (bottom < height) {
+        let refined = bottom;
+        for (let y = bottom - 1; y >= Math.max(top, bottom - yStep); y--) {
+          if (!rowIsWhite(y)) refined = y;
+          else break;
+        }
+        bottom = refined;
+      }
+      if (bottom - top < minHeight || bottom - top > maxHeight) continue;
+      if (!hasLogoAndText(top, bottom)) continue;
+      bands.push({top: top / height, bottom: bottom / height});
+      if (bands.length > 3) return image;
+    }
+    const removed = bands.reduce((sum, b) => sum + b.bottom - b.top, 0);
+    if (!bands.length || removed > .300000001) return image;
+    return image.removeHorizontalBands(bands) || image;
+  } catch (_) {
+    // Unknown input, API failures or excessive work always preserve the page.
+    return image;
+  }
 }
